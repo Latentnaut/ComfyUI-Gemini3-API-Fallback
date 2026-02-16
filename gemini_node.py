@@ -282,7 +282,6 @@ class GeminiPromptGenerator:
                 
             # Model name mapping for compatibility/hallucinated names
             model_map = {
-                "gemini-3-pro-image-preview": "gemini-2.0-flash",
                 "gemini-2.5-pro": "gemini-2.0-pro-exp-02-05",
                 "gemini-2.5-flash": "gemini-2.0-flash",
             }
