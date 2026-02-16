@@ -104,6 +104,8 @@ class Gemini3ProImageGenNode:
             config_kwargs = {
                 "system_instruction": effective_system,
                 "response_modalities": modalities_list,
+                # Disable AFC (Automatic Function Calling) to reduce overhead
+                "automatic_function_calling": types.AutomaticFunctionCallingConfig(disable=True),
                 "image_config": {"image_size": resolution}
             }
             if aspect_ratio != "auto" and actual_model not in no_aspect_ratio_models:
