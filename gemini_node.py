@@ -76,11 +76,18 @@ class Gemini3ProImageGenNode:
                 image_parts.append(types.Part.from_bytes(data=buffered.getvalue(), mime_type="image/png"))
 
         def call_api(current_key):
-            # Simple client (matching the working backup version)
-            client = genai.Client(api_key=current_key)
+            # Force REST by disabling HTTP/2 in httpx and setting a long timeout
+            client = genai.Client(
+                api_key=current_key,
+                http_options={
+                    "timeout": 300000,  # 300 seconds (5 minutes)
+                    "client_args": {"http2": False}
+                }
+            )
 
             # Model name mapping for compatibility
             model_map = {
+                "gemini-3-pro-image-preview": "gemini-2.0-flash",
                 "gemini-2.5-pro": "gemini-2.0-pro-exp-02-05",
                 "gemini-2.5-flash": "gemini-2.0-flash",
             }

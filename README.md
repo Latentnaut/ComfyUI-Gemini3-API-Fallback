@@ -23,9 +23,17 @@ The ultimate tool for prompt engineering, image analysis, and creative writing.
 
 ---
 
+---
+
 ## 🔑 Crucial: Setting up your Google API Keys
 
-To use **Gemini-3-Pro-Image** models, you **must** enable billing in your Google Cloud project. Otherwise, you will encounter a `Limit: 0` error.
+To use **Gemini-3-Pro-Image** models, you **must** enable billing in your Google Cloud project and verify your quotas. Otherwise, you will encounter a `Limit: 0` error.
+
+### ⚠️ Troubleshooting "Limit: 0" or "429 RESOURCE_EXHAUSTED"
+If you get an error saying `limit: 0`, even with billing enabled:
+1. **Model Quota**: Image models (`gemini-2.0-flash` or `imagen`) have a separate quota. Go to [Google Cloud Console > Quotas](https://console.cloud.google.com/iam-admin/quotas) and search for `generativelanguage.googleapis.com/generate_requests_per_model_per_day`.
+2. **Project Tier**: Return to [Google AI Studio](https://aistudio.google.com/), go to **Settings > Plan**, and confirm your project is on the **"Pay-as-you-go"** plan. If it says "Free", click "Edit" and choose your Billing project.
+3. **Region**: Some image models are only available in certain regions. Ensure your project is not restricted.
 
 ### 1. Get your API Keys
 1. Go to [Google AI Studio](https://aistudio.google.com/).
