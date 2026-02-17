@@ -24,6 +24,7 @@ Generate stunning high-fidelity images directly from ComfyUI using the latest `g
 
 ### 📝 Gemini 3 Pro (API Fallback)
 The ultimate tool for prompt engineering, image analysis, and creative writing.
+- **Native Batch Processing**: New `batch_count` parameter allows generating up to 64 unique prompts in a single node execution.
 - **Versatile Models**: Includes `gemini-3-pro-preview`, `gemini-3-flash-preview` (lowest latency), `gemini-2.0-pro-exp`, and `gemini-2.0-flash`.
 - **Iterative Logic**: Optimized for complex tasks with long-processing times.
 - **Automatic Multi-Modal**: Handles text and images seamlessly for context-aware generation.
