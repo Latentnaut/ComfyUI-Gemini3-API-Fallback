@@ -9,17 +9,24 @@ Expertly designed custom nodes for **Google Gemini** integration in ComfyUI, fea
 ### 🛡️ 3-Key Iterative System (API Fallback)
 Stop worrying about "Server Error 500" or rate limits. These nodes allow you to input up to **3 different API keys**. If the primary key fails, the system automatically rotates to the next one and retries up to your configured `max_retries`.
 
+### 🧠 Smart Retry & Dynamic Backoff
+Featuring **Dynamic Delay Parsing**: If Google requests a specific wait time (e.g., *"Please retry in 21s"*), the node automatically reads this and respects the exact delay requested by the server, significantly increasing success rates during periods of high congestion.
+
+### 🛡️ Stream Integrity Verification
+The nodes now strictly verify the completion of the response. If a connection is forcibly closed by the server or interrupted (e.g., *WinError 10054*), the system detects the missing "STOP" signal and automatically triggers a retry with key rotation, ensuring you never get truncated prompts or half-generated images.
+
 ### 🎨 Gemini 3 Pro Image (API Fallback)
 Generate stunning high-fidelity images directly from ComfyUI using the latest `gemini-3-pro-image-preview` model.
+- **Strict Model Separation**: Only image-native models are shown to avoid 404/400 errors.
 - **Native Resolutions**: 1K, 2K, and 4K support.
 - **Aspect Ratio Control**: Auto, 1:1, 16:9, 9:16, 21:9, and more.
-- **Visual Context**: Support for image inputs to guide generation (Multimodal).
+- **Visual Success Indicators**: Now with `✅` icons and chunk counting in the console.
 
 ### 📝 Gemini 3 Pro (API Fallback)
 The ultimate tool for prompt engineering, image analysis, and creative writing.
-- **Versatile Models**: Includes `gemini-3-pro-preview`, `gemini-2.5-pro`, `gemini-2.5-flash`, and specialized previews.
-- **Image-to-Text**: Upload images to get detailed descriptions or use them as a reference for new prompts.
-- **Clean UI**: Streamlined parameters focused on results.
+- **Versatile Models**: Includes `gemini-3-pro-preview`, `gemini-3-flash-preview` (lowest latency), `gemini-2.0-pro-exp`, and `gemini-2.0-flash`.
+- **Iterative Logic**: Optimized for complex tasks with long-processing times.
+- **Automatic Multi-Modal**: Handles text and images seamlessly for context-aware generation.
 
 ---
 

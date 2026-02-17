@@ -146,12 +146,21 @@ class Gemini3ProImageGenNode:
                 full_text = ""
                 image_found = False
                 chunk_count = 0
+                last_finish_reason = None
                 for chunk in response_stream:
                     chunk_count += 1
                     if comfy.model_management.processing_interrupted():
                         raise Exception("Interrupted by user")
-                    if not chunk.candidates or not chunk.candidates[0].content or not chunk.candidates[0].content.parts:
+                    if not chunk.candidates or not chunk.candidates[0].content:
+                        # Some chunks might carry finish_reason without content
+                        if chunk.candidates and chunk.candidates[0].finish_reason:
+                             last_finish_reason = chunk.candidates[0].finish_reason
                         continue
+                        
+                    last_finish_reason = chunk.candidates[0].finish_reason
+                    if not chunk.candidates[0].content.parts:
+                        continue
+
                     for part in chunk.candidates[0].content.parts:
                         if part.inline_data and part.inline_data.data:
                             image_data = part.inline_data.data
@@ -161,6 +170,11 @@ class Gemini3ProImageGenNode:
                             image_found = True
                         if part.text:
                             full_text += part.text
+
+                # Verify if the response was complete
+                # STOP (1) or MAX_TOKENS (8) are considered "complete" for our purposes
+                if last_finish_reason not in [types.FinishReason.STOP, types.FinishReason.MAX_TOKENS]:
+                     raise ValueError(f"Stream interrupted or blocked. Reason: {last_finish_reason}. Total chunks: {chunk_count}")
 
                 if image_found:
                     print(f"   ✅ Image received ({chunk_count} chunks).")
@@ -316,14 +330,25 @@ class GeminiPromptGenerator:
             
             full_text = ""
             chunk_count = 0
+            last_finish_reason = None
             for chunk in response_stream:
                 if comfy.model_management.processing_interrupted():
                     raise Exception("Interrupted by user")
-                if chunk.candidates and chunk.candidates[0].content and chunk.candidates[0].content.parts:
-                    for part in chunk.candidates[0].content.parts:
-                        if part.text:
-                            full_text += part.text
-                            chunk_count += 1
+                if not chunk.candidates:
+                    continue
+                
+                last_finish_reason = chunk.candidates[0].finish_reason
+                if not chunk.candidates[0].content or not chunk.candidates[0].content.parts:
+                    continue
+                    
+                for part in chunk.candidates[0].content.parts:
+                    if part.text:
+                        full_text += part.text
+                        chunk_count += 1
+            
+            # Verify if the response was complete
+            if last_finish_reason not in [types.FinishReason.STOP, types.FinishReason.MAX_TOKENS]:
+                 raise ValueError(f"Stream interrupted or blocked by Safety. Reason: {last_finish_reason}. Received: {len(full_text)} chars")
             
             if not full_text:
                 raise ValueError("Model returned empty text.")
