@@ -35,7 +35,7 @@ class Gemini3ProImageGenNode:
             "required": {
                 "system_instruction": ("STRING", {"multiline": True, "default": "You are a professional image generator. Maintain high cinematic quality.", "placeholder": "System instructions..."}),
                 "prompt": ("STRING", {"multiline": True, "default": "Make this image cyberpunk style", "placeholder": "Enter your prompt here..."}),
-                "model": (["gemini-3-pro-image-preview", "gemini-3-pro-preview", "gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash"], {"default": "gemini-3-pro-image-preview"}),
+                "model": (["gemini-3-pro-image-preview", "gemini-2.0-flash", "gemini-2.0-pro-exp-02-05"], {"default": "gemini-3-pro-image-preview"}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
                 
                 "aspect_ratio": (["auto", "1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"], {"default": "auto"}),
@@ -85,12 +85,8 @@ class Gemini3ProImageGenNode:
                 }
             )
 
-            # Model name mapping for compatibility
-            model_map = {
-                "gemini-2.5-pro": "gemini-2.0-pro-exp-02-05",
-                "gemini-2.5-flash": "gemini-2.0-flash",
-            }
-            actual_model = model_map.get(model, model)
+            # Clean model name mapping
+            actual_model = model
 
             # Use the official image generation system prompt, appended to user's system instruction
             effective_system = GEMINI_IMAGE_SYS_PROMPT
@@ -103,16 +99,16 @@ class Gemini3ProImageGenNode:
             else:
                 modalities_list = ["IMAGE", "TEXT"]
 
-            # Models that do NOT support aspect_ratio
-            no_aspect_ratio_models = {"gemini-3-pro-preview", "gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash"}
+            # Models that do NOT support aspect_ratio (mostly multimodal models generating images vs native image models)
+            no_aspect_ratio_models = {"gemini-2.0-flash", "gemini-2.0-pro-exp-02-05"}
 
             # Build config (matching working backup: dict-based image_config, no seed)
             config_kwargs = {
                 "system_instruction": effective_system,
                 "response_modalities": modalities_list,
-                # Disable AFC (Automatic Function Calling) to reduce overhead
+                "image_config": {"image_size": resolution},
+                # Disable AFC (Automatic Function Calling) to reduce overhead during congestion
                 "automatic_function_calling": types.AutomaticFunctionCallingConfig(disable=True),
-                "image_config": {"image_size": resolution}
             }
             if aspect_ratio != "auto" and actual_model not in no_aspect_ratio_models:
                 config_kwargs["image_config"]["aspect_ratio"] = aspect_ratio
@@ -137,7 +133,9 @@ class Gemini3ProImageGenNode:
                 out_tensor = None
                 full_text = ""
                 image_found = False
+                chunk_count = 0
                 for chunk in response_stream:
+                    chunk_count += 1
                     if comfy.model_management.processing_interrupted():
                         raise Exception("Interrupted by user")
                     if not chunk.candidates or not chunk.candidates[0].content or not chunk.candidates[0].content.parts:
@@ -153,6 +151,7 @@ class Gemini3ProImageGenNode:
                             full_text += part.text
 
                 if image_found:
+                    print(f"   ✅ Image received ({chunk_count} chunks).")
                     return out_tensor, full_text
 
                 # Text-only response — retry with same key after short delay
@@ -217,7 +216,7 @@ class GeminiPromptGenerator:
             "required": {
                 "system_instruction": ("STRING", {"multiline": True, "default": "You are a creative writer. Describe the image in detail.", "placeholder": "System instructions..."}),
                 "user_prompt": ("STRING", {"multiline": True, "default": "Describe this image", "placeholder": "User prompt..."}),
-                "model": (["gemini-3-pro-preview", "gemini-2.0-pro-exp-02-05", "gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash", "gemini-2.0-flash-lite-preview-02-05"], {"default": "gemini-3-pro-preview"}),
+                "model": (["gemini-3-pro-preview", "gemini-3-flash-preview", "gemini-2.0-pro-exp-02-05", "gemini-2.0-flash", "gemini-2.0-flash-lite-preview-02-05", "gemini-1.5-pro", "gemini-1.5-flash"], {"default": "gemini-3-pro-preview"}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
                 
                 "max_output_tokens": ("INT", {"default": 0, "min": 0, "max": 128000, "step": 64}),
@@ -280,12 +279,8 @@ class GeminiPromptGenerator:
             if max_output_tokens > 0:
                 config_kwargs["max_output_tokens"] = max_output_tokens
                 
-            # Model name mapping for compatibility/hallucinated names
-            model_map = {
-                "gemini-2.5-pro": "gemini-2.0-pro-exp-02-05",
-                "gemini-2.5-flash": "gemini-2.0-flash",
-            }
-            actual_model = model_map.get(model, model)
+            # Clean model name mapping
+            actual_model = model
                 
             print(f"\n🔵 [Gemini Prompt Gen] Sending request (streaming)...")
             print(f"   Model: {actual_model} (mapped from {model})")
