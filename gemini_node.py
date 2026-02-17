@@ -6,6 +6,18 @@ import time
 from google import genai
 from google.genai import types
 import comfy.model_management
+import re
+
+def parse_retry_delay(error_str):
+    """Extracts suggested wait time from Gemini error message."""
+    # Pattern: "Please retry in 21.54s" or similar
+    match = re.search(r"Please retry in (\d+\.?\d*)s", error_str)
+    if match:
+        try:
+            return float(match.group(1))
+        except:
+            pass
+    return None
 
 # Official ComfyUI system prompt for Gemini image generation
 GEMINI_IMAGE_SYS_PROMPT = (
@@ -187,11 +199,18 @@ class Gemini3ProImageGenNode:
             
             retry_count += 1
             if retry_count < api_max_retries:
+                # Use parsed delay if available, otherwise use fixed fallback
+                dynamic_delay = parse_retry_delay(error_str) if 'error_str' in locals() else None
+                current_wait = int(dynamic_delay) + 1 if dynamic_delay else wait_time
+                
                 print(f"\n⚠️ [Gemini Image Gen] All keys failed in Round {retry_count}/{api_max_retries}.")
-                print(f"⏳ [Gemini Image Gen] Waiting {wait_time}s to avoid rate limits...\n")
+                if dynamic_delay:
+                    print(f"⏳ [Gemini Image Gen] Google requested wait: {dynamic_delay}s. Sleeping {current_wait}s...\n")
+                else:
+                    print(f"⏳ [Gemini Image Gen] Waiting {wait_time}s to avoid rate limits...\n")
                 
                 # Sleep in small increments to allow interrupt
-                for _ in range(wait_time):
+                for _ in range(current_wait):
                     if comfy.model_management.processing_interrupted():
                         raise Exception("Interrupted by user")
                     time.sleep(1)
@@ -334,11 +353,18 @@ class GeminiPromptGenerator:
             
             retry_count += 1
             if retry_count < api_max_retries:
+                # Use parsed delay if available, otherwise use fixed fallback
+                dynamic_delay = parse_retry_delay(error_str) if 'error_str' in locals() else None
+                current_wait = int(dynamic_delay) + 1 if dynamic_delay else wait_time
+
                 print(f"\n⚠️ [Gemini Prompt Gen] All keys failed in Round {retry_count}/{api_max_retries}.")
-                print(f"⏳ [Gemini Prompt Gen] Waiting {wait_time}s to avoid rate limits...\n")
+                if dynamic_delay:
+                    print(f"⏳ [Gemini Prompt Gen] Google requested wait: {dynamic_delay}s. Sleeping {current_wait}s...\n")
+                else:
+                    print(f"⏳ [Gemini Prompt Gen] Waiting {wait_time}s to avoid rate limits...\n")
                 
                 # Sleep in small increments to allow interrupt
-                for _ in range(wait_time):
+                for _ in range(current_wait):
                     if comfy.model_management.processing_interrupted():
                         raise Exception("Interrupted by user")
                     time.sleep(1)
