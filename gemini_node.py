@@ -128,7 +128,7 @@ class Gemini3ProImageGenNode:
         for i in range(batch_size):
             # Intra-batch pacing delay to avoid instant 429 on large batches 
             if i > 0:
-                print(f"   ⏳ Throttling: Waiting 2.5s before next batch item to prevent rate limits...")
+                print(f"   ⏳ Throttling: Waiting 2.5s")
                 time.sleep(2.5)
 
             # Resolve parameters for this specific item in the batch
@@ -398,7 +398,7 @@ class GeminiPromptGenerator:
 
         for b in range(batch_count):
             if b > 0:
-                print(f"   ⏳ Throttling: Waiting 2.5s before generating prompt {b+1} to avoid 429 rate limit...")
+                print(f"   ⏳ Throttling: Waiting 2.5s")
                 time.sleep(2.5)
 
             current_seed = (seed + b) % 2147483647
