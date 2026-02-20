@@ -54,8 +54,8 @@ If you get an error saying `limit: 0`, even with billing enabled:
 2. Sign in with your Google Account.
 3. Click on the **"Get API key"** button on the top left sidebar.
 4. Click **"Create API key in new project"**.
-5. Copy your API Key and repeat to get up to 3 keys if you want full fallback protection.
-
+5. Copy your API Key.
+6. **IMPORTANT FOR 3x QUOTA**: Google applies Rate Limits (429) at the *Google Cloud Project* level, NOT per API key. If you generate 3 keys within the *same* project, they share the exact same quota. To genuinely triple your bandwidth and avoid 429 limits during heavy batches, your 3 API keys **must come from 3 separate Google Cloud Projects** with separate billing accounts enabled.
 ### 2. Enable Billing (Required for Image Generation)
 By enabling billing, you move to the "Pay-as-you-go" tier which unlocks the quota for image models. 
 > **Note:** Google often provides $300 in free credits for new accounts, which covers a significant amount of usage.
