@@ -43,3 +43,13 @@ Si, a pesar del balanceo de carga múltiple (Round-Robin) y las micropausas (Thr
 
 ## Conclusión
 La arquitectura del nodo `ComfyUI-Gemini3-API-Fallback` ha pasado de ser un simple emisor de peticiones a un sistema auto-regulado. Estas 5 capas de mitigación (Retroceso Exponencial, Balanceo Multi-Key, Pacing Delays, Tolerancia de Seguridad y Control de Enfriamiento) garantizan la continuidad operativa, absorbiendo proactivamente los fallos de Google y aislando nuestro flujo de trabajo de interrupciones o penalizaciones de red en producción.
+
+---
+
+## Fuentes y Referencias Técnicas
+Este plan de remediación técnica se ha diseñado siguiendo las directrices y análisis de las siguientes fuentes expertas en la infraestructura de Google Gemini (Nano Banana Pro):
+
+1. **Análisis de cuotas y errores:** [Gemini 3 Pro Image Preview Error Codes (429, 500) & Fixes](https://www.aifreeapi.com/en/posts/gemini-3-pro-image-preview-error-codes)
+2. **Estrategias de sobrecarga:** [Nano Banana Pro 503 Overloaded Error: Causes and Solutions](https://help.apiyi.com/en/nano-banana-pro-503-overloaded-error-solution-en.html)
+3. **Mitigación de seguridad:** [Nano Banana Troubleshooting Hub: Fix Every Error (429, 503, 400)](https://yingtu.ai/blog/nano-banana-troubleshooting-hub)
+4. **Arquitectura distribuida:** [Gemini Nano Banana Pro Overloaded Error Guide: 5 Strategic Solutions](https://help.apiyi.com/en/gemini-nano-banana-pro-overloaded-error-guide-en.html)
