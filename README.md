@@ -11,6 +11,12 @@ Stop worrying about "Server Error 500" or rate limits. These nodes allow you to 
 
 ### 🧠 Smart Retry & Dynamic Backoff
 Featuring **Dynamic Delay Parsing**: If Google requests a specific wait time (e.g., *"Please retry in 21s"*), the node automatically reads this and respects the exact delay requested by the server, significantly increasing success rates during periods of high congestion.
+- **Exponential Backoff (503)**: Progressively waits longer (1s, 2s, 4s...) with random jitter when models are overloaded, preventing server stampedes.
+- **60s Quota Cooldown (429)**: Automatically pauses for 60 seconds when hitting rate limits to let your per-minute quota refresh.
+- **Fast Internal Retry (500)**: Rapidly retries internal server errors with short 5-10s delays.
+
+### 🛡️ Enhanced Safety Settings for Creative Freedom
+Automatically configures Google's safety filters (Harassment, Hate Speech, Sexually Explicit, Dangerous Content) to `BLOCK_ONLY_HIGH`. This drastically reduces "Content Blocked" false positives for creative or professional prompts, avoiding frustrating `IMAGE_OTHER` formatting errors.
 
 ### 🛡️ Stream Integrity Verification
 The nodes now strictly verify the completion of the response. If a connection is forcibly closed by the server or interrupted (e.g., *WinError 10054*), the system detects the missing "STOP" signal and automatically triggers a retry with key rotation, ensuring you never get truncated prompts or half-generated images.

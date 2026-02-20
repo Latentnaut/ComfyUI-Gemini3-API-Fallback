@@ -3,21 +3,63 @@ import numpy as np
 from PIL import Image
 import io
 import time
+import random
 from google import genai
 from google.genai import types
 import comfy.model_management
 import re
 
-def parse_retry_delay(error_str):
-    """Extracts suggested wait time from Gemini error message."""
-    # Pattern: "Please retry in 21.54s" or similar
+def get_retry_wait_info(error_str, retry_count, default_wait=15):
+    """Calculates backoff wait time and message based on error type and retry count."""
+    if not isinstance(error_str, str):
+        error_str = str(error_str)
+        
+    err_str_lower = error_str.lower()
+    
+    if "503" in err_str_lower or "overloaded" in err_str_lower:
+        wait_time = min(60.0, (2 ** (retry_count - 1)) + random.uniform(0, 1))
+        msg = f"⏳ 503 Overload | Exponential backoff: Waiting {wait_time:.2f}s..."
+        return wait_time, msg
+        
+    if "429" in err_str_lower or "quota exhausted" in err_str_lower or "rate limit" in err_str_lower:
+        wait_time = 60.0
+        msg = f"⏳ Rate Limit Cooldown | Waiting 60s for per-minute quota refresh..."
+        return wait_time, msg
+        
+    if "500" in err_str_lower or "internal error" in err_str_lower:
+        wait_time = random.uniform(5, 10)
+        msg = f"⏳ 500 Internal Error | Waiting {wait_time:.2f}s before retry..."
+        return wait_time, msg
+
     match = re.search(r"Please retry in (\d+\.?\d*)s", error_str)
     if match:
         try:
-            return float(match.group(1))
+            wait_time = float(match.group(1))
+            msg = f"⏳ Dynamic Cooldown | Waiting {wait_time}s (Google request) before retry..."
+            return wait_time, msg
         except:
             pass
-    return None
+
+    return float(default_wait), f"⏳ Buffer Wait | Waiting {default_wait}s to clear API congestion..."
+
+def clean_error_msg(error_str):
+    """Makes API errors more readable for the console."""
+    err_str_lower = str(error_str).lower()
+    if "503" in err_str_lower or "overloaded" in err_str_lower:
+        return "Model Overloaded (503) - Server capacity reached. Retrying with backoff..."
+    if "429" in err_str_lower or "quota exhausted" in err_str_lower or "rate limit" in err_str_lower:
+        return "Rate Limit/Quota Exhausted (429). Waiting for rolling 60s refresh..."
+    if "404" in err_str_lower or "not found" in err_str_lower:
+        return f"Not Found/Model Unavailable (404). Check model name or region. Detail: {str(error_str)[:100]}"
+    if "403" in err_str_lower or "permission denied" in err_str_lower:
+        return f"Permission Denied (403). Check API key and billing. Detail: {str(error_str)[:100]}"
+    if "400" in err_str_lower or "invalid argument" in err_str_lower:
+         return f"Invalid Request (400). Check arguments (e.g., inlineData). Detail: {str(error_str)[:100]}"
+    if "500" in err_str_lower or "internal error" in err_str_lower:
+         return f"Internal Server Error (500). Google side issue. Retrying shortly..."
+
+    clean = re.sub(r"\{'error': \{.*?\}\}", "", str(error_str)).strip()
+    return clean if clean else str(error_str)
 
 # Official ComfyUI system prompt for Gemini image generation
 GEMINI_IMAGE_SYS_PROMPT = (
@@ -35,7 +77,7 @@ class Gemini3ProImageGenNode:
     Features:
     - Supports gemini-3-pro-image-preview.
     - 3-Key Iterative Retry System with configurable rounds.
-    - Enhanced English logging.
+    - Enhanced English logging with Batch counter support.
     """
 
     def __init__(self):
@@ -47,7 +89,7 @@ class Gemini3ProImageGenNode:
             "required": {
                 "system_instruction": ("STRING", {"multiline": True, "default": "You are a professional image generator. Maintain high cinematic quality.", "placeholder": "System instructions..."}),
                 "prompt": ("STRING", {"multiline": True, "default": "Make this image cyberpunk style", "placeholder": "Enter your prompt here..."}),
-                "model": (["gemini-3-pro-image-preview", "gemini-2.0-flash", "gemini-2.0-pro-exp-02-05"], {"default": "gemini-3-pro-image-preview"}),
+                "model": (["gemini-3.1-pro-preview", "gemini-3-pro-image-preview", "gemini-2.0-flash", "gemini-2.0-pro-exp-02-05"], {"default": "gemini-3-pro-image-preview"}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
                 
                 "aspect_ratio": (["auto", "1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"], {"default": "auto"}),
@@ -64,23 +106,92 @@ class Gemini3ProImageGenNode:
             }
         }
 
+    INPUT_IS_LIST = True
     RETURN_TYPES = ("IMAGE", "STRING")
     RETURN_NAMES = ("processed_image", "text_response")
-    FUNCTION = "process_image"
+    OUTPUT_IS_LIST = (True, True)
+    FUNCTION = "process_batch"
     CATEGORY = "Gemini AI"
 
-    def process_image(self, system_instruction, prompt, model, seed, aspect_ratio, resolution, response_modalities, api_key_1, api_key_2, api_key_3, api_max_retries, images=None):
+    def process_batch(self, system_instruction, prompt, model, seed, aspect_ratio, resolution, response_modalities, api_key_1, api_key_2, api_key_3, api_max_retries, images=None):
+        # Determine total items to process based on inputs
+        batch_size = max(len(prompt), len(images) if images is not None else 0)
+        
+        results_images = []
+        results_texts = []
+        
+        # Build available keys list for load balancing
+        available_keys = [k.strip() for k in [api_key_1[0] if api_key_1 else "", 
+                                              api_key_2[0] if api_key_2 else "", 
+                                              api_key_3[0] if api_key_3 else ""] if k and k.strip()]
+
+        for i in range(batch_size):
+            # Intra-batch pacing delay to avoid instant 429 on large batches 
+            if i > 0:
+                print(f"   ⏳ Throttling: Waiting 2.5s before next batch item to prevent rate limits...")
+                time.sleep(2.5)
+
+            # Resolve parameters for this specific item in the batch
+            # We use modulo to cycle through parameters if they are shorter than the batch size (standard ComfyUI behavior)
+            curr_sys = system_instruction[i % len(system_instruction)]
+            curr_prompt = prompt[i % len(prompt)]
+            curr_model = model[i % len(model)]
+            
+            # Smart seed logic: if we have one seed input but multiple prompts, auto-increment
+            if len(seed) == 1:
+                curr_seed = (seed[0] + i) % 0xffffffffffffffff
+            else:
+                curr_seed = seed[i % len(seed)]
+                
+            curr_aspect = aspect_ratio[i % len(aspect_ratio)]
+            curr_res = resolution[i % len(resolution)]
+            curr_modal = response_modalities[i % len(response_modalities)]
+            
+            # API Keys and Global Settings
+            # Instead of passing individual keys, we will pass them all but tell the exec function
+            # which one to try FIRST based on round-robin logic.
+            k1 = api_key_1[0] if api_key_1 else ""
+            k2 = api_key_2[0] if api_key_2 else ""
+            k3 = api_key_3[0] if api_key_3 else ""
+            max_r = api_max_retries[0] if api_max_retries else 10
+            
+            # Key rotation starting index for load-balancing
+            round_robin_idx = (i % len(available_keys)) if available_keys else 0
+            
+            curr_img_input = images[i % len(images)] if images is not None else None
+
+            # Execute single generation
+            out_img, out_txt = self._exec_single(
+                curr_sys, curr_prompt, curr_model, curr_seed, curr_aspect, curr_res, curr_modal,
+                k1, k2, k3, max_r, 
+                curr_img_input, 
+                curr_batch=i+1, 
+                total_batch=batch_size,
+                start_key_idx=round_robin_idx
+            )
+            
+            results_images.append(out_img)
+            results_texts.append(out_txt)
+
+        return (results_images, results_texts)
+
+    def _exec_single(self, system_instruction, prompt, model, seed, aspect_ratio, resolution, response_modalities, api_key_1, api_key_2, api_key_3, api_max_retries, images=None, curr_batch=1, total_batch=1, start_key_idx=0):
         if not prompt or not prompt.strip():
             raise ValueError("Prompt is required!")
 
-        keys = [k.strip() for k in [api_key_1, api_key_2, api_key_3] if k and k.strip()]
-        if not keys:
+        all_keys = [k.strip() for k in [api_key_1, api_key_2, api_key_3] if k and k.strip()]
+        if not all_keys:
             raise ValueError("No API Key provided!")
+            
+        # Re-order keys to start with the load-balanced index first, followed by the others naturally
+        keys = all_keys[start_key_idx:] + all_keys[:start_key_idx]
 
         image_parts = []
         if images is not None:
-            for i in range(images.shape[0]):
-                img_tensor = images[i]
+            # images can be [H,W,C] or [B,H,W,C]
+            img_to_proc = images if len(images.shape) == 4 else images.unsqueeze(0)
+            for j in range(img_to_proc.shape[0]):
+                img_tensor = img_to_proc[j]
                 np_img = 255. * img_tensor.cpu().numpy()
                 pil_img = Image.fromarray(np.clip(np_img, 0, 255).astype(np.uint8))
                 buffered = io.BytesIO()
@@ -88,52 +199,48 @@ class Gemini3ProImageGenNode:
                 image_parts.append(types.Part.from_bytes(data=buffered.getvalue(), mime_type="image/png"))
 
         def call_api(current_key):
-            # Force REST by disabling HTTP/2 in httpx and setting a long timeout
             client = genai.Client(
                 api_key=current_key,
                 http_options={
-                    "timeout": 300000,  # 300 seconds (5 minutes)
+                    "timeout": 300000,
                     "client_args": {"http2": False}
                 }
             )
 
-            # Clean model name mapping
             actual_model = model
-
-            # Use the official image generation system prompt, appended to user's system instruction
             effective_system = GEMINI_IMAGE_SYS_PROMPT
             if system_instruction and system_instruction.strip():
                 effective_system = system_instruction.strip() + "\n\n" + GEMINI_IMAGE_SYS_PROMPT
 
-            # Match official node: IMAGE -> ["IMAGE"], IMAGE+TEXT -> ["IMAGE", "TEXT"]
-            if response_modalities == "IMAGE":
-                modalities_list = ["IMAGE"]
-            else:
-                modalities_list = ["IMAGE", "TEXT"]
+            modalities_list = ["IMAGE"] if response_modalities == "IMAGE" else ["IMAGE", "TEXT"]
+            no_aspect_ratio_models = {"gemini-2.0-flash", "gemini-2.0-pro-exp-02-05", "gemini-3.1-pro-preview"}
+            
+            safety_settings = [
+                types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HARASSMENT, threshold=types.HarmBlockThreshold.BLOCK_ONLY_HIGH),
+                types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold=types.HarmBlockThreshold.BLOCK_ONLY_HIGH),
+                types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold=types.HarmBlockThreshold.BLOCK_ONLY_HIGH),
+                types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold=types.HarmBlockThreshold.BLOCK_ONLY_HIGH),
+            ]
 
-            # Models that do NOT support aspect_ratio (mostly multimodal models generating images vs native image models)
-            no_aspect_ratio_models = {"gemini-2.0-flash", "gemini-2.0-pro-exp-02-05"}
-
-            # Build config (matching working backup: dict-based image_config, no seed)
             config_kwargs = {
                 "system_instruction": effective_system,
                 "response_modalities": modalities_list,
                 "image_config": {"image_size": resolution},
-                # Disable AFC (Automatic Function Calling) to reduce overhead during congestion
                 "automatic_function_calling": types.AutomaticFunctionCallingConfig(disable=True),
+                "safety_settings": safety_settings,
             }
             if aspect_ratio != "auto" and actual_model not in no_aspect_ratio_models:
                 config_kwargs["image_config"]["aspect_ratio"] = aspect_ratio
 
-            # Retry text-only responses per key (model behavior, not key issue)
             TEXT_ONLY_RETRIES = 3
             for text_retry in range(TEXT_ONLY_RETRIES):
-                print(f"\n🔵 [Gemini Image Gen] Sending request...")
-                print(f"   Model: {actual_model} (mapped from {model})")
-                print(f"   Key:   ****{current_key[-4:]}")
-                print(f"   Config: modalities={modalities_list}, image_config={config_kwargs.get('image_config', 'none')}")
+                # Informative logging with Batch counter
+                batch_info = f" | Batch {curr_batch}/{total_batch}" if total_batch > 1 else ""
+                print(f"\n🎨 Gemini Image{batch_info} | Generating image...")
+                print(f"   Model: {actual_model} | Resolution: {resolution} | Ratio: {aspect_ratio} | Seed: {seed}")
+                print(f"   Key:   Using Key #{text_retry + 1} (****{current_key[-4:]})")
                 if text_retry > 0:
-                    print(f"   ↻ Text-only retry {text_retry}/{TEXT_ONLY_RETRIES - 1} (same key)")
+                    print(f"   ↻ Safety Retry {text_retry}/{TEXT_ONLY_RETRIES - 1} (Retrying same key...)")
 
                 content_parts = [types.Part.from_text(text=prompt)] + image_parts
                 response_stream = client.models.generate_content_stream(
@@ -152,7 +259,6 @@ class Gemini3ProImageGenNode:
                     if comfy.model_management.processing_interrupted():
                         raise Exception("Interrupted by user")
                     if not chunk.candidates or not chunk.candidates[0].content:
-                        # Some chunks might carry finish_reason without content
                         if chunk.candidates and chunk.candidates[0].finish_reason:
                              last_finish_reason = chunk.candidates[0].finish_reason
                         continue
@@ -171,25 +277,23 @@ class Gemini3ProImageGenNode:
                         if part.text:
                             full_text += part.text
 
-                # Verify if the response was complete
-                # STOP (1) or MAX_TOKENS (8) are considered "complete" for our purposes
-                if last_finish_reason not in [types.FinishReason.STOP, types.FinishReason.MAX_TOKENS]:
-                     raise ValueError(f"Stream interrupted or blocked. Reason: {last_finish_reason}. Total chunks: {chunk_count}")
+                if last_finish_reason == types.FinishReason.IMAGE_OTHER:
+                     raise ValueError(f"IMAGE_OTHER: Image generation blocked by Google's policy. Try a more generic prompt.")
+                elif last_finish_reason not in [types.FinishReason.STOP, types.FinishReason.MAX_TOKENS]:
+                     raise ValueError(f"Stream interrupted. Reason: {last_finish_reason}. Chunks: {chunk_count}")
 
                 if image_found:
-                    print(f"   ✅ Image received ({chunk_count} chunks).")
+                    print(f"   ✅ Success! Image received ({chunk_count} chunks handled).")
                     return out_tensor, full_text
 
-                # Text-only response — retry with same key after short delay
-                print(f"   ⚠️ Model returned text only (attempt {text_retry + 1}/{TEXT_ONLY_RETRIES})")
+                print(f"   ⚠️ Warning: Model returned text description instead of image.")
                 if text_retry < TEXT_ONLY_RETRIES - 1:
-                    # Short sleep before retrying (model non-determinism, not rate limit)
                     for _ in range(5):
                         if comfy.model_management.processing_interrupted():
                             raise Exception("Interrupted by user")
                         time.sleep(1)
 
-            raise ValueError(f"Model returned text only after {TEXT_ONLY_RETRIES} attempts: {full_text[:200]}...")
+            raise ValueError(f"Model returned text only after {TEXT_ONLY_RETRIES} attempts.")
 
         retry_count = 0
         wait_time = 15
@@ -203,33 +307,30 @@ class Gemini3ProImageGenNode:
                     if comfy.model_management.processing_interrupted():
                         raise Exception("Interrupted by user")
                     error_str = str(e)
-                    print(f"\n❌ [Gemini Image Gen] Key #{index + 1} (****{key[-4:]}) failed.")
-                    print(f"   Error: {error_str}")
-                    # Bail immediately on 400 errors (deterministic, will never succeed on retry)
+                    print(f"\n❌ Key Failure | Key #{index + 1} (****{key[-4:]}) failed.")
+                    print(f"   Reason: {clean_error_msg(error_str)}")
+                    
+                    if "disconnected" in error_str.lower() or "remote protocol" in error_str.lower() or "10054" in error_str:
+                        print(f"   ℹ️ Notice: Transient network hiccup. Automatic retry in progress...")
+
                     if "400 INVALID_ARGUMENT" in error_str:
-                        raise ValueError(f"Gemini Image Gen fatal error (not retryable): {error_str}")
+                        raise ValueError(f"Fatal error (not retryable): {error_str}")
                     if index < len(keys) - 1:
-                        print(f"🔄 [Gemini Image Gen] Rotating to next backup key...")
+                        print(f"🔄 Rotating API keys to find an available worker...")
             
             retry_count += 1
             if retry_count < api_max_retries:
-                # Use parsed delay if available, otherwise use fixed fallback
-                dynamic_delay = parse_retry_delay(error_str) if 'error_str' in locals() else None
-                current_wait = int(dynamic_delay) + 1 if dynamic_delay else wait_time
+                current_wait_sec, wait_msg = get_retry_wait_info(error_str if 'error_str' in locals() else "", retry_count, default_wait=wait_time)
                 
-                print(f"\n⚠️ [Gemini Image Gen] All keys failed in Round {retry_count}/{api_max_retries}.")
-                if dynamic_delay:
-                    print(f"⏳ [Gemini Image Gen] Google requested wait: {dynamic_delay}s. Sleeping {current_wait}s...\n")
-                else:
-                    print(f"⏳ [Gemini Image Gen] Waiting {wait_time}s to avoid rate limits...\n")
+                print(f"⚠️ Round {retry_count}/{api_max_retries} Exhausted | All keys temporarily unavailable.")
+                print(wait_msg)
                 
-                # Sleep in small increments to allow interrupt
-                for _ in range(current_wait):
+                for _ in range(int(current_wait_sec) + 1):
                     if comfy.model_management.processing_interrupted():
                         raise Exception("Interrupted by user")
                     time.sleep(1)
         
-        raise ValueError(f"Gemini Image Gen failed after {api_max_retries} rounds.")
+        raise ValueError(f"Failed after {api_max_retries} rounds.")
 
 class GeminiPromptGenerator:
     """
@@ -250,7 +351,7 @@ class GeminiPromptGenerator:
                 "system_instruction": ("STRING", {"multiline": True, "default": "You are a creative writer. Describe the image in detail.", "placeholder": "System instructions..."}),
                 "user_prompt": ("STRING", {"multiline": True, "default": "Describe this image", "placeholder": "User prompt..."}),
                 "batch_count": ("INT", {"default": 1, "min": 1, "max": 64, "step": 1}),
-                "model": (["gemini-3-pro-preview", "gemini-3-flash-preview", "gemini-2.0-pro-exp-02-05", "gemini-2.0-flash", "gemini-2.0-flash-lite-preview-02-05", "gemini-1.5-pro", "gemini-1.5-flash"], {"default": "gemini-3-pro-preview"}),
+                "model": (["gemini-3.1-pro-preview", "gemini-3-pro-preview", "gemini-3-flash-preview", "gemini-2.0-pro-exp-02-05", "gemini-2.0-flash", "gemini-2.0-flash-lite-preview-02-05", "gemini-1.5-pro", "gemini-1.5-flash"], {"default": "gemini-3.1-pro-preview"}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
                 "max_output_tokens": ("INT", {"default": 0, "min": 0, "max": 128000, "step": 64}),
                 "api_key_1": ("STRING", {"multiline": False, "default": "", "placeholder": "Primary API Key (Required)"}),
@@ -291,9 +392,19 @@ class GeminiPromptGenerator:
             input_parts.append(types.Part.from_text(text=user_prompt))
 
         results = []
+        
+        # Build available keys list for load balancing
+        available_keys = [k.strip() for k in [api_key_1, api_key_2, api_key_3] if k and k.strip()]
 
         for b in range(batch_count):
+            if b > 0:
+                print(f"   ⏳ Throttling: Waiting 2.5s before generating prompt {b+1} to avoid 429 rate limit...")
+                time.sleep(2.5)
+
             current_seed = (seed + b) % 2147483647
+            # Load balancing offset for API keys
+            start_key_idx = b % len(available_keys)
+            keys = available_keys[start_key_idx:] + available_keys[:start_key_idx]
             
             def call_api(current_key):
                 nonlocal current_seed
@@ -309,11 +420,19 @@ class GeminiPromptGenerator:
                     "seed": current_seed,
                     "response_modalities": ["TEXT"],
                     "automatic_function_calling": types.AutomaticFunctionCallingConfig(disable=True),
+                    "safety_settings": [
+                        types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HARASSMENT, threshold=types.HarmBlockThreshold.BLOCK_ONLY_HIGH),
+                        types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold=types.HarmBlockThreshold.BLOCK_ONLY_HIGH),
+                        types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold=types.HarmBlockThreshold.BLOCK_ONLY_HIGH),
+                        types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold=types.HarmBlockThreshold.BLOCK_ONLY_HIGH),
+                    ],
                 }
                 if max_output_tokens > 0:
                     config_kwargs["max_output_tokens"] = max_output_tokens
                 
-                print(f"\n🔵 [Gemini Prompt Gen] Batch {b+1}/{batch_count} - Seed: {current_seed}")
+                batch_str = f" | Batch {b+1}/{batch_count}" if batch_count > 1 else ""
+                print(f"\n📝 Gemini Prompt{batch_info} | Processing..." if 'batch_info' in locals() else f"\n📝 Gemini Prompt{batch_str} | Processing...")
+                print(f"   Model: {model} | Seed: {current_seed}")
                 
                 response_stream = client.models.generate_content_stream(
                     model=model,
@@ -345,7 +464,7 @@ class GeminiPromptGenerator:
                 if not full_text:
                     raise ValueError("Model returned empty text.")
                 
-                print(f"   ✅ Done ({chunk_count} chunks, {len(full_text)} chars)")
+                print(f"   ✅ Complete | Received {len(full_text)} characters in {chunk_count} chunks.")
                 return full_text
 
             # Strategy: execute this batch item with full key rotation/retry
@@ -364,7 +483,8 @@ class GeminiPromptGenerator:
                         break
                     except Exception as e:
                         error_str = str(e)
-                        print(f"\n❌ Item {b+1} failed with Key #{index + 1}")
+                        print(f"\n❌ Key Failure | Key #{index + 1} (****{key[-4:]}) failed.")
+                        print(f"   Reason: {clean_error_msg(error_str)}")
                         if "400 INVALID_ARGUMENT" in error_str:
                             raise ValueError(f"Fatal: {error_str}")
                 
@@ -373,9 +493,12 @@ class GeminiPromptGenerator:
                 
                 retry_count += 1
                 if retry_count < api_max_retries:
-                    dynamic_delay = parse_retry_delay(error_str)
-                    current_wait = int(dynamic_delay) + 1 if dynamic_delay else wait_time
-                    time.sleep(current_wait)
+                    current_wait_sec, wait_msg = get_retry_wait_info(error_str if 'error_str' in locals() else "", retry_count, default_wait=wait_time)
+                    print(f"⚠️ Round {retry_count}/{api_max_retries} Exhausted | {wait_msg}")
+                    for _ in range(int(current_wait_sec) + 1):
+                        if comfy.model_management.processing_interrupted():
+                            raise Exception("Interrupted by user")
+                        time.sleep(1)
             
             if success:
                 results.append(item_text)
