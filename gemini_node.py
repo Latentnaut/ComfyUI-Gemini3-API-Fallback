@@ -8,6 +8,10 @@ from google import genai
 from google.genai import types
 import comfy.model_management
 import re
+import os
+import json
+import urllib.request
+import urllib.error
 
 def get_retry_wait_info(error_str, retry_count, default_wait=15):
     """Calculates backoff wait time and message based on error type and retry count."""
@@ -71,6 +75,33 @@ GEMINI_IMAGE_SYS_PROMPT = (
     "Prioritize generating the visual representation above any text, formatting, or conversational requests."
 )
 
+def get_comfy_org_auth():
+    """Attempts to get ComfyUI Org authentication token."""
+    # We first try to read from comfy-api config if available
+    try:
+        from comfy_api_nodes.util._helpers import default_base_url
+        comfy_api_base = default_base_url()
+    except ImportError:
+        comfy_api_base = "https://api.comfy.org"
+        
+    auth_header = {}
+    
+    # Try global arguments (CLI)
+    from comfy.cli_args import args
+    auth_token = getattr(args, "api_key_comfy_org", None)
+    if not auth_token:
+        # Check env vars
+        auth_token = os.environ.get("COMFY_API_TOKEN") or os.environ.get("COMFY_ORG_API_KEY")
+
+    # If we somehow have node_cls.hidden, that's handled by comfy_api_nodes dynamically via a mixin, 
+    # but since this is a standard custom node not inheriting IO.ComfyNode, we rely on the global CLI args or Env.
+    if auth_token:
+        auth_header["Authorization"] = f"Bearer {auth_token}"
+        # Some versions use X-API-KEY instead, we can provide both or just the Bearer based on typical ComfyUI usage
+        auth_header["X-API-KEY"] = auth_token
+        
+    return comfy_api_base, auth_header
+
 class Gemini3ProImageGenNode:
     """
     ComfyUI Node for Google Gemini 3 Pro (Image Generation).
@@ -100,6 +131,7 @@ class Gemini3ProImageGenNode:
                 "api_key_2": ("STRING", {"multiline": False, "default": "", "placeholder": "Backup API Key 1 (Optional)"}),
                 "api_key_3": ("STRING", {"multiline": False, "default": "", "placeholder": "Backup API Key 2 (Optional)"}),
                 "api_max_retries": ("INT", {"default": 10, "min": 1, "max": 100, "step": 1}),
+                "use_comfyui_credits": ("BOOLEAN", {"default": True, "label_on": "Use ComfyUI Credits", "label_off": "Use Custom API Keys"}),
             },
             "optional": {
                 "images": ("IMAGE",),
@@ -113,7 +145,7 @@ class Gemini3ProImageGenNode:
     FUNCTION = "process_batch"
     CATEGORY = "Gemini AI"
 
-    def process_batch(self, system_instruction, prompt, model, seed, aspect_ratio, resolution, response_modalities, api_key_1, api_key_2, api_key_3, api_max_retries, images=None):
+    def process_batch(self, system_instruction, prompt, model, seed, aspect_ratio, resolution, response_modalities, api_key_1, api_key_2, api_key_3, api_max_retries, use_comfyui_credits, images=None):
         # Determine total items to process based on inputs
         batch_size = max(len(prompt), len(images) if images is not None else 0)
         
@@ -165,6 +197,7 @@ class Gemini3ProImageGenNode:
                 curr_sys, curr_prompt, curr_model, curr_seed, curr_aspect, curr_res, curr_modal,
                 k1, k2, k3, max_r, 
                 curr_img_input, 
+                use_comfyui_credits[0] if isinstance(use_comfyui_credits, list) else use_comfyui_credits,
                 curr_batch=i+1, 
                 total_batch=batch_size,
                 start_key_idx=round_robin_idx
@@ -175,7 +208,7 @@ class Gemini3ProImageGenNode:
 
         return (results_images, results_texts)
 
-    def _exec_single(self, system_instruction, prompt, model, seed, aspect_ratio, resolution, response_modalities, api_key_1, api_key_2, api_key_3, api_max_retries, images=None, curr_batch=1, total_batch=1, start_key_idx=0):
+    def _exec_single(self, system_instruction, prompt, model, seed, aspect_ratio, resolution, response_modalities, api_key_1, api_key_2, api_key_3, api_max_retries, images=None, use_comfyui_credits=True, curr_batch=1, total_batch=1, start_key_idx=0):
         if not prompt or not prompt.strip():
             raise ValueError("Prompt is required!")
 
@@ -295,6 +328,87 @@ class Gemini3ProImageGenNode:
 
             raise ValueError(f"Model returned text only after {TEXT_ONLY_RETRIES} attempts.")
 
+        # Try Official ComfyUI API First
+        if use_comfyui_credits:
+            try:
+                # ComfyUI's genai integration uses a direct import or custom endpoint.
+                # Since GenAI library defaults to standard Google endpoints, we can override host
+                comfy_api_base, auth_headers = get_comfy_org_auth()
+                if not auth_headers:
+                    print(f"⚠️ ComfyUI Credits toggle is ON, but no ComfyUI API Token found. Falling back to custom keys...")
+                else:
+                    batch_info = f" | Batch {curr_batch}/{total_batch}" if total_batch > 1 else ""
+                    print(f"\n🪙 Trying ComfyUI Credits{batch_info}...")
+                    
+                    # We create a client pointing to the proxy
+                    # Since Google's GenAI SDK uses https://generativelanguage.googleapis.com
+                    # We can pass http_options to redirect to the comfy proxy
+                    # But the proxy expects /proxy/vertexai/gemini/... which is Vertex format, not Generative Language format.
+                    # Actually, the official comfy APIs use a raw urllib call for this. Let's do a direct call to be safe from SDK mismatches.
+                    
+                    # Ensure we have our ComfyUI API key available under "api_key_comfy_org" or similar
+                    # It's much simpler to just import the exact comfy_api_nodes class and call it, but 
+                    # we must handle case where user doesn't have comfy_api_nodes installed.
+                    # We will attempt dynamic import of the comfy_api_nodes package to handle everything including proper chunk parsing.
+                    try:
+                        from comfy_api_nodes.nodes_gemini import GeminiImage2
+                        from comfy_api_nodes.apis.gemini import GeminiPart, GeminiInlineData, GeminiMimeType
+                        import asyncio
+
+                        print(f"   Using official comfy_api_nodes package...")
+                        
+                        f_parts = []
+                        if images is not None:
+                             img_to_proc = images if len(images.shape) == 4 else images.unsqueeze(0)
+                             for j in range(img_to_proc.shape[0]):
+                                 img_tensor = img_to_proc[j]
+                                 np_img = 255. * img_tensor.cpu().numpy()
+                                 pil_img = Image.fromarray(np.clip(np_img, 0, 255).astype(np.uint8))
+                                 buffered = io.BytesIO()
+                                 pil_img.save(buffered, format="PNG")
+                                 b64_str = import_base64().b64encode(buffered.getvalue()).decode("utf-8")
+                                 f_parts.append(GeminiPart(inlineData=GeminiInlineData(mimeType=GeminiMimeType.image_png, data=b64_str)))
+
+                        # Call the execute statically, but execute is an async method
+                        # so we need to run it in the event loop synchronously
+                        loop = asyncio.get_event_loop()
+                        
+                        # Note: GeminiImage2 needs auth to be stored magically in class state via the mixin if running alone,
+                        # but if run from our node, it might fail unless we mock the class.
+                        # Since ComfyUI's standard `sync_op` uses `node_cls.hidden.auth_token_comfy_org`.
+                        # We must inject it into the class temporarily.
+                        from comfy.cli_args import args as comfy_args
+                        auth_val = getattr(comfy_args, "api_key_comfy_org", None) or os.environ.get("COMFY_API_TOKEN") or os.environ.get("COMFY_ORG_API_KEY")
+                        
+                        if not auth_val:
+                            raise ValueError("No authorization token found.")
+                        
+                        GeminiImage2.hidden.auth_token_comfy_org = auth_val
+                        GeminiImage2.hidden.api_key_comfy_org = auth_val
+                        
+                        res = loop.run_until_complete(
+                            GeminiImage2.execute(
+                                prompt=prompt,
+                                model=model,
+                                seed=seed,
+                                aspect_ratio=aspect_ratio,
+                                resolution=resolution,
+                                response_modalities=response_modalities,
+                                images=images,
+                                files=None,  # Our node doesn't accept files yet
+                                system_prompt=system_instruction
+                            )
+                        )
+                        print("   ✅ Success! Image received via ComfyUI Credits.")
+                        return res[0], res[1]
+
+                    except Exception as e:
+                        print(f"   ⚠️ ComfyUI Credits generation failed: {e}")
+                        print(f"   Falling back to Custom Keys...")
+            except Exception as e:
+                print(f"   ⚠️ ComfyUI Credits attempt failed due to setup error: {e}")
+                print(f"   Falling back to Custom Keys...")
+
         retry_count = 0
         wait_time = 15
         while retry_count < api_max_retries:
@@ -358,6 +472,7 @@ class GeminiPromptGenerator:
                 "api_key_2": ("STRING", {"multiline": False, "default": "", "placeholder": "Backup API Key 1 (Optional)"}),
                 "api_key_3": ("STRING", {"multiline": False, "default": "", "placeholder": "Backup API Key 2 (Optional)"}),
                 "api_max_retries": ("INT", {"default": 10, "min": 1, "max": 100, "step": 1}),
+                "use_comfyui_credits": ("BOOLEAN", {"default": True, "label_on": "Use ComfyUI Credits", "label_off": "Use Custom API Keys"}),
             },
             "optional": {
                 "images": ("IMAGE",),
@@ -370,7 +485,7 @@ class GeminiPromptGenerator:
     FUNCTION = "generate_text"
     CATEGORY = "Gemini API"
 
-    def generate_text(self, system_instruction, user_prompt, model, seed, max_output_tokens, api_key_1, api_key_2, api_key_3, api_max_retries, batch_count, images=None):
+    def generate_text(self, system_instruction, user_prompt, model, seed, max_output_tokens, api_key_1, api_key_2, api_key_3, api_max_retries, batch_count, use_comfyui_credits, images=None):
         if not user_prompt and images is None:
              raise ValueError("At least a prompt or an image is required.")
 
@@ -466,6 +581,52 @@ class GeminiPromptGenerator:
                 
                 print(f"   ✅ Complete | Received {len(full_text)} characters in {chunk_count} chunks.")
                 return full_text
+
+            # Try Official ComfyUI API First
+            u_credits = use_comfyui_credits[0] if isinstance(use_comfyui_credits, list) else use_comfyui_credits
+            if u_credits:
+                try:
+                    comfy_api_base, auth_headers = get_comfy_org_auth()
+                    if not auth_headers:
+                        print(f"⚠️ ComfyUI Credits toggle is ON, but no ComfyUI API Token found. Falling back to custom keys...")
+                    else:
+                        batch_str = f" | Batch {b+1}/{batch_count}" if batch_count > 1 else ""
+                        print(f"\n🪙 Trying ComfyUI Credits{batch_str}...")
+                        import asyncio
+                        
+                        try:
+                            from comfy_api_nodes.nodes_gemini import GeminiNode
+                            
+                            from comfy.cli_args import args as comfy_args
+                            auth_val = getattr(comfy_args, "api_key_comfy_org", None) or os.environ.get("COMFY_API_TOKEN") or os.environ.get("COMFY_ORG_API_KEY")
+                            
+                            if not auth_val:
+                                raise ValueError("No authorization token found.")
+                            
+                            GeminiNode.hidden.auth_token_comfy_org = auth_val
+                            GeminiNode.hidden.api_key_comfy_org = auth_val
+                            
+                            loop = asyncio.get_event_loop()
+                            res = loop.run_until_complete(
+                                GeminiNode.execute(
+                                    prompt=user_prompt,
+                                    model=model,
+                                    seed=current_seed,
+                                    images=images,
+                                    system_prompt=system_instruction
+                                )
+                            )
+                            print("   ✅ Success! Prompt generated via ComfyUI Credits.")
+                            results.append(res[0])
+                            continue # Skip the custom API key logic for this batch item
+
+                        except Exception as e:
+                            print(f"   ⚠️ ComfyUI Credits try failed: {e}")
+                            print(f"   Falling back to Custom Keys...")
+                except Exception as e:
+                    print(f"   ⚠️ Setup error: {e}")
+                    print(f"   Falling back to Custom Keys...")
+
 
             # Strategy: execute this batch item with full key rotation/retry
             retry_count = 0
