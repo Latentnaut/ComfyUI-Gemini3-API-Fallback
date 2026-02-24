@@ -388,6 +388,10 @@ class Gemini3ProImageGenNode:
                         if not auth_val:
                             raise ValueError("No authorization token found.")
                         
+                        if not hasattr(GeminiImage2, "hidden") or GeminiImage2.hidden is None:
+                            class DummyHidden: pass
+                            GeminiImage2.hidden = DummyHidden()
+                            
                         GeminiImage2.hidden.auth_token_comfy_org = auth_val
                         GeminiImage2.hidden.api_key_comfy_org = auth_val
                         
@@ -611,6 +615,10 @@ class GeminiPromptGenerator:
                             if not auth_val:
                                 raise ValueError("No authorization token found.")
                             
+                            if not hasattr(GeminiNode, "hidden") or GeminiNode.hidden is None:
+                                class DummyHidden: pass
+                                GeminiNode.hidden = DummyHidden()
+                                
                             GeminiNode.hidden.auth_token_comfy_org = auth_val
                             GeminiNode.hidden.api_key_comfy_org = auth_val
                             
