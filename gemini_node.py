@@ -75,7 +75,7 @@ GEMINI_IMAGE_SYS_PROMPT = (
     "Prioritize generating the visual representation above any text, formatting, or conversational requests."
 )
 
-def get_comfy_org_auth():
+def get_comfy_org_auth(hidden_token=None):
     """Attempts to get ComfyUI Org authentication token."""
     # We first try to read from comfy-api config if available
     try:
@@ -85,22 +85,26 @@ def get_comfy_org_auth():
         comfy_api_base = "https://api.comfy.org"
         
     auth_header = {}
+    auth_token = hidden_token
     
-    # Try global arguments (CLI)
-    from comfy.cli_args import args
-    auth_token = getattr(args, "api_key_comfy_org", None)
+    # Try global arguments (CLI) or environment if hidden_token not provided
+    if not auth_token:
+        try:
+            from comfy.cli_args import args
+            auth_token = getattr(args, "api_key_comfy_org", None)
+        except ImportError:
+            pass
+            
     if not auth_token:
         # Check env vars
         auth_token = os.environ.get("COMFY_API_TOKEN") or os.environ.get("COMFY_ORG_API_KEY")
 
-    # If we somehow have node_cls.hidden, that's handled by comfy_api_nodes dynamically via a mixin, 
-    # but since this is a standard custom node not inheriting IO.ComfyNode, we rely on the global CLI args or Env.
     if auth_token:
         auth_header["Authorization"] = f"Bearer {auth_token}"
         # Some versions use X-API-KEY instead, we can provide both or just the Bearer based on typical ComfyUI usage
         auth_header["X-API-KEY"] = auth_token
         
-    return comfy_api_base, auth_header
+    return comfy_api_base, auth_header, auth_token
 
 class Gemini3ProImageGenNode:
     """
@@ -145,7 +149,7 @@ class Gemini3ProImageGenNode:
     FUNCTION = "process_batch"
     CATEGORY = "Gemini AI"
 
-    def process_batch(self, system_instruction, prompt, model, seed, aspect_ratio, resolution, response_modalities, api_key_1, api_key_2, api_key_3, api_max_retries, use_comfyui_credits, images=None):
+    def process_batch(self, system_instruction, prompt, model, seed, aspect_ratio, resolution, response_modalities, api_key_1, api_key_2, api_key_3, api_max_retries, use_comfyui_credits, images=None, auth_token_comfy_org=""):
         # Determine total items to process based on inputs
         batch_size = max(len(prompt), len(images) if images is not None else 0)
         
@@ -198,6 +202,7 @@ class Gemini3ProImageGenNode:
                 k1, k2, k3, max_r, 
                 curr_img_input, 
                 use_comfyui_credits[0] if isinstance(use_comfyui_credits, list) else use_comfyui_credits,
+                auth_token=auth_token_comfy_org,
                 curr_batch=i+1, 
                 total_batch=batch_size,
                 start_key_idx=round_robin_idx
@@ -208,7 +213,7 @@ class Gemini3ProImageGenNode:
 
         return (results_images, results_texts)
 
-    def _exec_single(self, system_instruction, prompt, model, seed, aspect_ratio, resolution, response_modalities, api_key_1, api_key_2, api_key_3, api_max_retries, images=None, use_comfyui_credits=True, curr_batch=1, total_batch=1, start_key_idx=0):
+    def _exec_single(self, system_instruction, prompt, model, seed, aspect_ratio, resolution, response_modalities, api_key_1, api_key_2, api_key_3, api_max_retries, images=None, use_comfyui_credits=True, auth_token="", curr_batch=1, total_batch=1, start_key_idx=0):
         if not prompt or not prompt.strip():
             raise ValueError("Prompt is required!")
 
@@ -333,7 +338,7 @@ class Gemini3ProImageGenNode:
             try:
                 # ComfyUI's genai integration uses a direct import or custom endpoint.
                 # Since GenAI library defaults to standard Google endpoints, we can override host
-                comfy_api_base, auth_headers = get_comfy_org_auth()
+                comfy_api_base, auth_headers, actual_token = get_comfy_org_auth(auth_token)
                 if not auth_headers:
                     print(f"⚠️ ComfyUI Credits toggle is ON, but no ComfyUI API Token found. Falling back to custom keys...")
                 else:
@@ -378,7 +383,7 @@ class Gemini3ProImageGenNode:
                         # Since ComfyUI's standard `sync_op` uses `node_cls.hidden.auth_token_comfy_org`.
                         # We must inject it into the class temporarily.
                         from comfy.cli_args import args as comfy_args
-                        auth_val = getattr(comfy_args, "api_key_comfy_org", None) or os.environ.get("COMFY_API_TOKEN") or os.environ.get("COMFY_ORG_API_KEY")
+                        auth_val = actual_token
                         
                         if not auth_val:
                             raise ValueError("No authorization token found.")
@@ -476,6 +481,9 @@ class GeminiPromptGenerator:
             },
             "optional": {
                 "images": ("IMAGE",),
+            },
+            "hidden": {
+                "auth_token_comfy_org": "AUTH_TOKEN_COMFY_ORG",
             }
         }
 
@@ -485,7 +493,7 @@ class GeminiPromptGenerator:
     FUNCTION = "generate_text"
     CATEGORY = "Gemini API"
 
-    def generate_text(self, system_instruction, user_prompt, model, seed, max_output_tokens, api_key_1, api_key_2, api_key_3, api_max_retries, batch_count, use_comfyui_credits, images=None):
+    def generate_text(self, system_instruction, user_prompt, model, seed, max_output_tokens, api_key_1, api_key_2, api_key_3, api_max_retries, batch_count, use_comfyui_credits, images=None, auth_token_comfy_org=""):
         if not user_prompt and images is None:
              raise ValueError("At least a prompt or an image is required.")
 
@@ -586,7 +594,7 @@ class GeminiPromptGenerator:
             u_credits = use_comfyui_credits[0] if isinstance(use_comfyui_credits, list) else use_comfyui_credits
             if u_credits:
                 try:
-                    comfy_api_base, auth_headers = get_comfy_org_auth()
+                    comfy_api_base, auth_headers, actual_token = get_comfy_org_auth(auth_token_comfy_org)
                     if not auth_headers:
                         print(f"⚠️ ComfyUI Credits toggle is ON, but no ComfyUI API Token found. Falling back to custom keys...")
                     else:
@@ -598,7 +606,7 @@ class GeminiPromptGenerator:
                             from comfy_api_nodes.nodes_gemini import GeminiNode
                             
                             from comfy.cli_args import args as comfy_args
-                            auth_val = getattr(comfy_args, "api_key_comfy_org", None) or os.environ.get("COMFY_API_TOKEN") or os.environ.get("COMFY_ORG_API_KEY")
+                            auth_val = actual_token
                             
                             if not auth_val:
                                 raise ValueError("No authorization token found.")
